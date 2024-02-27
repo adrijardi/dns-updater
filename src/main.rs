@@ -10,24 +10,25 @@ use crate::{
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_route53::{config::Region, Client};
 use clap::Parser;
+use humantime::Duration;
 use tokio_schedule::{every, Job};
 
-#[derive(Debug, Parser)]
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
 struct Opt {
-    /// The AWS Region.
-    #[structopt(short, long)]
+    #[arg(short, long)]
     region: Option<String>,
 
-    /// The hosted zone id
-    #[structopt(short = 'z', long)]
+    #[arg(short = 'z', long)]
     hosted_zone_id: String,
 
-    /// The record set name
-    #[structopt(short = 's', long)]
+    #[arg(short = 's', long)]
     record_set_name: String,
 
-    /// Whether to display additional runtime information.
-    #[structopt(short, long)]
+    #[arg(short, long, default_value = "5s")]
+    interval: Duration,
+
+    #[arg(short, long)]
     verbose: bool,
 }
 
@@ -39,8 +40,7 @@ async fn check_and_update_ip(
     let full_record_name = &format!("{record_name}.");
 
     let target_ip = get_my_ip().await?;
-    println!();
-    println!("Target ip {}", target_ip);
+    println!("\nTarget ip {}", target_ip);
 
     let current_ip = get_current_ip(client, hosted_zone_id, full_record_name).await?;
 
@@ -65,6 +65,7 @@ async fn main() -> Result<(), String> {
         region,
         hosted_zone_id,
         record_set_name,
+        interval,
         verbose,
     } = Opt::parse();
 
@@ -84,17 +85,39 @@ async fn main() -> Result<(), String> {
     let shared_config = aws_config::from_env().region(region_provider).load().await;
     let client = Client::new(&shared_config);
 
-    check_and_update_ip(&client, &hosted_zone_id, &record_set_name)
-        .await?;
+    if verbose {
+        println!("\nAttempting dns check/update on startup\n");
+    }
+    
+    check_and_update_ip(&client, &hosted_zone_id, &record_set_name).await?;
 
-    println!();
-    println!("Startup successful");
+    if verbose {
+        println!("\nInitial run successful\n");
+    }
 
-    let scheduler = every(5).minutes().perform(|| async {
+    let interval_seconds = interval
+        .as_secs()
+        .try_into()
+        .map_err(|_| {
+            format!(
+                "interval of {} seconds exceeds maximum value",
+                interval.as_secs().to_string()
+            )
+        })
+        .unwrap();
+
+    if verbose {
+        println!(
+            "\nSchedule successful, refreshing every {} seconds",
+            interval_seconds
+        );
+    }
+
+    let scheduler = every(interval_seconds).seconds().perform(|| async {
         check_and_update_ip(&client, &hosted_zone_id, &record_set_name)
-        .await
-        .map(|_| println!("Update run successfully"))
-        .unwrap_or_else(|err| println!("Update failed: {}", err))
+            .await
+            .map(|_| println!("Update run successfully"))
+            .unwrap_or_else(|err| println!("Update failed: {}", err))
     });
 
     scheduler.await;
